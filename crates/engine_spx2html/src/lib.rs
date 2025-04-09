@@ -17,6 +17,7 @@ use tectonic_xdv::{FileType, XdvEvents, XdvParser};
 mod assets;
 mod emission;
 mod finalization;
+mod font;
 mod fontfile;
 mod fonts;
 mod html;

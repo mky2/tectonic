@@ -12,19 +12,14 @@
 
 use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use percent_encoding::{utf8_percent_encode, CONTROLS};
-use pinot::{
-    math::MathVariants,
-    otl::{Feature, SubtableKind},
-    types::{FWord, Tag, UfWord},
-    FontDataRef, TableProvider,
-};
 use std::{collections::HashMap, num::Wrapping, path::Path};
-use tectonic_errors::prelude::*;
+use tectonic_errors::{anyhow::Context, prelude::*};
+use ttf_parser::{self as ttf, GlyphId, Tag};
 
-use crate::FixedPoint;
-
-/// A numerical identifier of a glyph in a font.
-pub type GlyphId = u16;
+use crate::{
+    font::{load_lookup, load_math_variants, ReverseGlyphMap, Variant},
+    FixedPoint,
+};
 
 /// A Unicode Scalar Value.
 ///
@@ -32,7 +27,7 @@ pub type GlyphId = u16;
 /// inclusive). Values within this range can be converted to Rust "char" values.
 pub type Usv = u32;
 
-const SSTY: Tag = Tag(0x73_73_74_79);
+const SSTY: Tag = Tag::from_bytes(b"ssty");
 
 /// A type for retrieving data about the glyphs used in a particular font.
 #[derive(Debug)]
@@ -43,19 +38,19 @@ pub struct FontFileData {
     buffer: Vec<u8>,
 
     /// Information about how glyphs can be reverse-mapped to Unicode input
-    gmap: HashMap<GlyphId, MapEntry>,
+    reverse_glyph_map: ReverseGlyphMap,
 
     /// The glyph for the basic space character, or zero (typically .notdef) if
     /// it can't be found.
     space_glyph: GlyphId,
 
-    units_per_em: UfWord,
+    units_per_em: u16,
 
     hmetrics: Vec<HorizontalMetrics>,
-    ascender: FWord,
+    ascender: i16,
 
     /// This value is typically negative.
-    descender: FWord,
+    descender: i16,
 
     /// The fractional position of the baseline within the character cell:
     /// `ascender / (ascender - descender)`, keeping in mind that `descender` is
@@ -82,40 +77,6 @@ pub struct FontFileData {
     /// The offset of the HEAD table within the font data. We need
     /// this for the variant cmap munging.
     fontdata_head_offset: u32,
-}
-
-/// Information about the reverse-mapping of a glyph to Unicode.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum MapEntry {
-    /// The glyph corresponds directly to the specified Unicode character.
-    Direct(char),
-
-    /// The glyph corresponds to the sub/super-script form of the specified
-    /// Unicode character.
-    ///
-    /// In an OpenType/TrueType font, this glyph representation is obtained with
-    /// the first glyph substitution obtained using the `ssty` feature. If the
-    /// associated bool is false, the glyph was the first variant form, used
-    /// for sub/super-scripts on regular equation terms. If it is true, it is a
-    /// "double" sub/super-script, e.g. the "z" in `x^{y^z}`.
-    SubSuperScript(char, bool),
-
-    /// The glyph corresponds to an enlarged version of a math symbol.
-    ///
-    /// If true, the boolean field indicates a vertically growing variant.
-    /// Otherwise, it is horizontal. The u16 is the variant number in the
-    /// sequence of growing variants.
-    MathGrowingVariant(char, bool, u16),
-}
-
-impl MapEntry {
-    fn get_char(&self) -> char {
-        match *self {
-            MapEntry::Direct(c) => c,
-            MapEntry::SubSuperScript(c, _) => c,
-            MapEntry::MathGrowingVariant(c, _, _) => c,
-        }
-    }
 }
 
 /// Information about an "variant mapping" to be used for a glyph.
@@ -165,10 +126,10 @@ pub struct GlyphMetrics {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct HorizontalMetrics {
     /// Advance width in font units
-    advance: UfWord,
+    advance: u16,
 
     /// Left side bearing in font units
-    lsb: FWord,
+    lsb: i16,
 }
 
 impl FontFileData {
@@ -176,41 +137,25 @@ impl FontFileData {
     ///
     /// We take ownership of the font data that we're given.
     pub fn from_opentype(buffer: Vec<u8>, face_index: u32) -> Result<Self> {
-        let font_data = a_ok_or!(
-            FontDataRef::new(&buffer);
-            ["unable to parse buffer as OpenType font"]
-        );
+        let font = ttf::Face::parse(&buffer, face_index)
+            .with_context(|| format!("unable to load face #{} in the OpenType font", face_index))?;
 
-        let font = a_ok_or!(
-            font_data.get(face_index);
-            ["unable to load face #{} in the OpenType font", face_index]
-        );
+        let tables = font.tables();
+        let head = &tables.head;
+        let units_per_em = head.units_per_em;
 
-        let head = a_ok_or!(
-            font.head();
-            ["unable to parse OpenType font: missing/invalid HEAD table"]
-        );
+        let mut reverse_glyph_map = ReverseGlyphMap::new();
+        let mut space_glyph = GlyphId(0);
 
-        let units_per_em = head.units_per_em();
-
-        // Get the direct mappings. While we're at it, figure out the glyph for
-        // the space character, so that we can know how wide spaces are, so that
-        // we can guess when to insert spaces into our HTML content.
-
-        let cmap = a_ok_or!(
-            font.cmap();
-            ["unable to parse OpenType font: missing/invalid CMAP table"]
-        );
-
-        let mut gmap = HashMap::new();
-        let mut space_glyph = 0;
+        let mut dglyphs: Vec<_> = Vec::new();
 
         for usv in valid_usvs() {
             let c = char::from_u32(usv).unwrap();
 
-            let gidx = match cmap.map(usv) {
-                Some(g) if g != 0 => g,
+            let gidx = match font.glyph_index(c) {
+                Some(g) if g.0 != 0 => g,
                 _ => {
+                    // Glyph not found.
                     continue;
                 }
             };
@@ -219,27 +164,37 @@ impl FontFileData {
                 space_glyph = gidx;
             }
 
-            gmap.insert(gidx, MapEntry::Direct(c));
+            dglyphs.push((c, gidx));
         }
 
         // Check for additional substitution-based mappings.
 
-        let dglyphs: Vec<_> = gmap.keys().copied().collect();
+        if let Some(gsub) = tables.gsub {
+            for feat in gsub.features {
+                if feat.tag != SSTY {
+                    continue;
+                }
 
-        if let Some(gsub) = font.gsub() {
-            for feat in gsub.features() {
-                if feat.record.tag == SSTY {
-                    load_ssty_mappings(&mut gmap, &feat, &dglyphs[..])?;
+                for lookup_idx in feat.lookup_indices {
+                    if let Some(ref lookup) = gsub.lookups.get(lookup_idx) {
+                        load_lookup(&mut reverse_glyph_map, lookup, &dglyphs);
+                    }
                 }
             }
         }
 
         // Check for math extras.
 
-        if let Some(math) = font.math() {
-            if let Some(variants) = math.variants() {
-                load_math_variants(&mut gmap, &variants, &dglyphs[..])?;
+        if let Some(math) = tables.math {
+            if let Some(ref variants) = math.variants {
+                load_math_variants(&mut reverse_glyph_map, variants, &dglyphs);
             }
+        }
+
+        // Finally put all dglyphs to reverse_glyph_map.
+
+        for (c, g) in dglyphs {
+            reverse_glyph_map.insert((c, Variant::Id), g);
         }
 
         // Get horizontal metrics data. Note that pinot doesn't currently
@@ -247,34 +202,29 @@ impl FontFileData {
         // is a lot easier if we just copy out the data instead of trying to
         // hold a reference to the FontRef in the created struct.
 
-        let hhea = a_ok_or!(
-            font.hhea();
-            ["unable to parse OpenType font: missing/invalid HMTX table"]
-        );
-
-        let ascender = hhea.ascender();
-        let descender = hhea.descender();
+        let ascender = tables.hhea.ascender;
+        let descender = tables.hhea.descender;
 
         // Recall that descender < 0 in the relevant convention:
         let baseline_factor = ascender as f32 / (ascender - descender) as f32;
 
         let hmtx = a_ok_or!(
-            font.hmtx();
+            tables.hmtx;
             ["unable to parse OpenType font: missing/invalid HMTX table"]
         );
 
-        let mut hmetrics = Vec::new();
+        let mut hmetrics = Vec::with_capacity((hmtx.number_of_metrics * 2) as usize);
 
-        for hm in hmtx.hmetrics() {
+        for hm in hmtx.metrics {
             hmetrics.push(HorizontalMetrics {
-                advance: hm.advance_width,
-                lsb: hm.lsb,
+                advance: hm.advance,
+                lsb: hm.side_bearing,
             });
         }
 
         let advance = hmetrics[hmetrics.len() - 1].advance;
 
-        for lsb in hmtx.lsbs() {
+        for lsb in hmtx.bearings {
             hmetrics.push(HorizontalMetrics { advance, lsb });
         }
 
@@ -286,19 +236,27 @@ impl FontFileData {
         let mut fontdata_cmap_trec_idx = 0;
         let mut fontdata_head_offset = 0;
 
-        for (idx, trec) in font.records().iter().enumerate() {
-            if trec.tag == pinot::head::HEAD {
+        for (idx, trec) in font.raw_face().table_records.into_iter().enumerate() {
+            if trec.tag == Tag::from_bytes(b"head") {
                 fontdata_head_offset = trec.offset;
-            } else if trec.tag == pinot::cmap::CMAP {
+            } else if trec.tag == Tag::from_bytes(b"cmap") {
                 fontdata_cmap_trec_idx = idx;
             }
         }
+
+        println!(
+            "Font stats: (size {}) (face {}) ({} {})",
+            reverse_glyph_map.len(),
+            face_index,
+            fontdata_cmap_trec_idx,
+            fontdata_head_offset,
+        );
 
         // All done!
 
         Ok(FontFileData {
             buffer,
-            gmap,
+            reverse_glyph_map,
             space_glyph,
             units_per_em,
             hmetrics,
@@ -314,8 +272,8 @@ impl FontFileData {
     }
 
     /// Attempt to retrieve a mapping entry for the given glyph.
-    pub fn lookup_mapping(&self, glyph: GlyphId) -> Option<MapEntry> {
-        self.gmap.get(&glyph).copied()
+    pub fn lookup_mapping(&self, glyph: GlyphId) -> Option<(char, Variant)> {
+        self.reverse_glyph_map.query_usv(glyph)
     }
 
     /// Get the position of the baseline within the standard glyph cell.
@@ -334,15 +292,15 @@ impl FontFileData {
         // is what we want here as a least-bad fallback. We don't want to
         // have to deal with fallibility in this conversion.
 
-        let fword_to_tex = |f: FWord| -> FixedPoint {
+        let fword_to_tex = |f: i16| -> FixedPoint {
             (f as f64 * tex_size as f64 / self.units_per_em as f64) as FixedPoint
         };
 
-        let ufword_to_tex = |f: UfWord| -> FixedPoint {
+        let ufword_to_tex = |f: u16| -> FixedPoint {
             (f as f64 * tex_size as f64 / self.units_per_em as f64) as FixedPoint
         };
 
-        self.hmetrics.get(glyph as usize).map(|hm| GlyphMetrics {
+        self.hmetrics.get(glyph.0 as usize).map(|hm| GlyphMetrics {
             advance: ufword_to_tex(hm.advance),
             lsb: fword_to_tex(hm.lsb),
             ascent: fword_to_tex(self.ascender),
@@ -352,10 +310,10 @@ impl FontFileData {
 
     /// Get the width of the space character as a TeX size.
     pub fn space_width(&self, tex_size: FixedPoint) -> Option<FixedPoint> {
-        if self.space_glyph == 0 {
+        if self.space_glyph == GlyphId(0) {
             None
         } else {
-            self.hmetrics.get(self.space_glyph as usize).map(|hm| {
+            self.hmetrics.get(self.space_glyph.0 as usize).map(|hm| {
                 (hm.advance as f64 * tex_size as f64 / self.units_per_em as f64) as FixedPoint
             })
         }
@@ -520,7 +478,7 @@ impl FontFileData {
         let mut vglyphs = HashMap::default();
 
         for (glyph, altmap) in self.variant_map_allocations.drain() {
-            vglyphs.insert(glyph.to_string(), altmap.into());
+            vglyphs.insert(glyph.0.to_string(), altmap.into());
         }
 
         vglyphs
@@ -534,7 +492,7 @@ impl FontFileData {
         self.variant_map_allocations.clear();
 
         for (gid, mapping) in &ffad.vglyphs {
-            let gid: GlyphId = gid.parse().unwrap();
+            let gid: GlyphId = GlyphId(gid.parse().unwrap());
 
             self.variant_map_allocations.insert(gid, (*mapping).into());
 
@@ -544,78 +502,6 @@ impl FontFileData {
 
         self.no_new_variants = true;
     }
-}
-
-fn load_ssty_mappings(
-    map: &mut HashMap<GlyphId, MapEntry>,
-    feat: &Feature,
-    dglyphs: &[GlyphId],
-) -> Result<()> {
-    for look in feat.lookups() {
-        for st in look.subtables() {
-            for glyph in dglyphs {
-                let c = map.get(glyph).unwrap().get_char();
-
-                if let Some(cov) = st.covered(*glyph) {
-                    // Implement more subtable kinds as needed ...
-                    if let SubtableKind::AlternateSubst1(t) = st.kind() {
-                        if let Some(sl) = t.get(cov) {
-                            if let Some(g) = sl.get(0) {
-                                map.insert(g, MapEntry::SubSuperScript(c, false));
-                            }
-
-                            if let Some(g) = sl.get(1) {
-                                map.insert(g, MapEntry::SubSuperScript(c, true));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn load_math_variants(
-    map: &mut HashMap<GlyphId, MapEntry>,
-    variants: &MathVariants,
-    dglyphs: &[GlyphId],
-) -> Result<()> {
-    let maybe_vcov = variants.vert_glyph_coverage();
-    let maybe_hcov = variants.horiz_glyph_coverage();
-
-    for glyph in dglyphs {
-        let c = map.get(glyph).unwrap().get_char();
-
-        if let Some(vvars) = maybe_vcov
-            .and_then(|c| c.get(*glyph))
-            .and_then(|i| variants.vert_glyph_construction(i))
-            .and_then(|c| c.variants())
-        {
-            for (idx, vinfo) in vvars.iter().enumerate() {
-                map.insert(
-                    vinfo.variant_glyph,
-                    MapEntry::MathGrowingVariant(c, true, idx as u16),
-                );
-            }
-        }
-
-        if let Some(hvars) = maybe_hcov
-            .and_then(|c| c.get(*glyph))
-            .and_then(|i| variants.horiz_glyph_construction(i))
-            .and_then(|c| c.variants())
-        {
-            for (idx, vinfo) in hvars.iter().enumerate() {
-                map.insert(
-                    vinfo.variant_glyph,
-                    MapEntry::MathGrowingVariant(c, false, idx as u16),
-                );
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn valid_usvs() -> impl Iterator<Item = Usv> {
@@ -661,7 +547,7 @@ fn append_simple_cmap(buf: &mut Vec<u8>, map: &[(char, GlyphId)]) {
     for (usv, gid) in map {
         buf.write_u32::<BigEndian>(*usv as u32).unwrap(); // start char
         buf.write_u32::<BigEndian>(*usv as u32).unwrap(); // end char
-        buf.write_u32::<BigEndian>(*gid as u32).unwrap(); // glyph id
+        buf.write_u32::<BigEndian>(gid.0 as u32).unwrap(); // glyph id
     }
 }
 

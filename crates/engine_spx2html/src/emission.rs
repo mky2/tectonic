@@ -10,6 +10,7 @@ use std::{
 };
 use tectonic_errors::prelude::*;
 use tectonic_status_base::tt_warning;
+use ttf_parser::GlyphId;
 
 use crate::{
     assets::Assets,
@@ -243,7 +244,7 @@ struct GlyphInfo {
     dx: i32,
     dy: i32,
     font_num: TexFontNum,
-    glyph: u16,
+    glyph: GlyphId,
 }
 
 #[derive(Debug)]
@@ -768,6 +769,8 @@ impl EmittingState {
         ys: &[i32],
         common: &mut Common,
     ) -> Result<()> {
+        let glyphs: &[GlyphId] = unsafe { std::mem::transmute(glyphs) };
+
         if let Some(c) = self.current_canvas.as_mut() {
             for i in 0..glyphs.len() {
                 c.glyphs.push(GlyphInfo {
@@ -813,6 +816,9 @@ impl EmittingState {
         ys: &[i32],
         common: &mut Common,
     ) -> Result<()> {
+        // Safety: GlyphId is a transparent wrapper around u16.
+        let glyphs: &[GlyphId] = unsafe { std::mem::transmute(glyphs) };
+
         if let Some(c) = self.current_canvas.as_mut() {
             for i in 0..glyphs.len() {
                 c.glyphs.push(GlyphInfo {
@@ -1121,7 +1127,7 @@ impl EmittingState {
 
                 write!(
                     inner_content,
-                    "<span class=\"ci\" style=\"top: {}rem; left: {}rem; font-size: {}rem; {}\">",
+                    "<span class=\"ci\" style=\"top: {:.4}rem; left: {:.4}rem; font-size: {:.4}rem; {}\">",
                     top_rem,
                     gi.dx as f32 * self.rems_per_tex,
                     rel_size,
@@ -1146,7 +1152,9 @@ impl EmittingState {
 
             write!(
                 inner_content,
-                "<span class=\"cr\" style=\"top: {top_rem}rem; left: {left_rem}rem; width: {rel_width}rem; height: {rel_height}rem;\"></span>",
+                "<span class=\"cr\" style=\"top: {:.4}rem; left: {:.4}rem; width: {:.4}rem; height: {:.4}rem;\"></span>",
+                top_rem, left_rem,
+                rel_width, rel_height,
             )
             .unwrap();
         }

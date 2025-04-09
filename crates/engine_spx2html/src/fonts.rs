@@ -10,10 +10,12 @@ use std::{collections::HashMap, fmt::Write, io::Read, path::Path};
 use tectonic_errors::prelude::*;
 use tectonic_io_base::InputHandle;
 use tectonic_status_base::{tt_warning, StatusBackend};
+use ttf_parser::GlyphId;
 
 use crate::{
     assets::syntax,
-    fontfile::{FontFileData, GlyphId, GlyphMetrics, MapEntry},
+    font::Variant,
+    fontfile::{FontFileData, GlyphMetrics},
     Common, FixedPoint, TexFontNum,
 };
 
@@ -614,14 +616,8 @@ fn get_text_info(
     glyph: GlyphId,
     status: &mut dyn StatusBackend,
 ) -> Option<(char, String)> {
-    let text_info = font.details.lookup_mapping(glyph).map(|mc| {
-        let (mut ch, need_alt) = match mc {
-            MapEntry::Direct(c) => (c, false),
-            MapEntry::SubSuperScript(c, _) => (c, true),
-            MapEntry::MathGrowingVariant(c, _, _) => (c, true),
-        };
-
-        let var_index = if need_alt {
+    let text_info = font.details.lookup_mapping(glyph).map(|(mut ch, v)| {
+        let var_index = if !matches!(v, Variant::Id) {
             if let Some(map) = font.details.request_variant(glyph, ch) {
                 ch = map.usv;
                 Some(map.variant_map_index)
@@ -629,7 +625,7 @@ fn get_text_info(
                 tt_warning!(
                     status,
                     "prohibited from defining new variant glyph {} in font `{}` (face {})",
-                    glyph,
+                    glyph.0,
                     font.out_rel_path,
                     font.face_index
                 );
@@ -650,7 +646,7 @@ fn get_text_info(
         tt_warning!(
             status,
             "unable to reverse-map glyph {} in font `{}` (face {})",
-            glyph,
+            glyph.0,
             font.out_rel_path,
             font.face_index
         );
