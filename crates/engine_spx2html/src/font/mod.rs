@@ -1,78 +1,91 @@
-use std::collections::HashMap;
+use ahash::AHashMap;
 
 use ttf_parser::{
-    gsub::{AlternateSubstitution, SubstitutionSubtable},
+    gsub::{AlternateSubstitution, SingleSubstitution, SubstitutionSubtable},
     opentype_layout::Lookup,
-    GlyphId,
+    GlyphId, Tag,
 };
 
-trait SubstituteGlyphVisitor<D> {
-    fn visit_glyph<F: FnMut(GlyphId, D)>(&self, glyph: GlyphId, consumer: F);
+trait VariantGlyphVisitor {
+    /// Visit a variant glyph.
+    fn visit_glyph(&self, dglyph: GlyphId, f: impl FnMut(GlyphId)) -> Option<()>;
 }
 
-impl SubstituteGlyphVisitor<Variant> for Lookup<'_> {
-    fn visit_glyph<F: FnMut(GlyphId, Variant)>(&self, glyph: GlyphId, mut consumer: F) {
-        use SubstitutionSubtable::*;
-
-        for st in self.subtables.into_iter::<SubstitutionSubtable>() {
-            match st {
-                Alternate(t) => t.visit_glyph(glyph, &mut consumer),
-                _ => {}
-            }
-        }
-    }
-}
-
-impl SubstituteGlyphVisitor<Variant> for AlternateSubstitution<'_> {
-    fn visit_glyph<F: FnMut(GlyphId, Variant)>(&self, glyph: GlyphId, mut consumer: F) {
+impl VariantGlyphVisitor for AlternateSubstitution<'_> {
+    fn visit_glyph(&self, dglyph: GlyphId, mut f: impl FnMut(GlyphId)) -> Option<()> {
         self.coverage
-            .get(glyph)
-            .map(|id| self.alternate_sets.get(id).unwrap().alternates)
+            .get(dglyph)
+            .and_then(|index| self.alternate_sets.get(index))
+            .map(|ref a| a.alternates)
             .iter()
             .for_each(|set| {
-                set.into_iter()
-                    .enumerate()
-                    .for_each(|(i, g)| consumer(g, Variant::Ssty(i as u16)));
+                set.into_iter().for_each(|g| f(g));
             });
+        Some(())
     }
 }
 
-// impl SubstituteGlyphSupplier for SingleSubstitution<'_> {
-//     fn substitute_glyph<F: Fn(GlyphId)>(&self, glyph: GlyphId, consumer: F) {
-//         match *self {
-//             SingleSubstitution::Format1 { coverage, delta } => {
-//                 coverage.get(glyph).map(|id| {
-//                     glyph.0 + delta
-//                 });
-//             },
-//             SingleSubstitution::Format2 { coverage, substitutes } => {
-//
-//             },
-//         }
-//     }
-// }
+impl VariantGlyphVisitor for SingleSubstitution<'_> {
+    fn visit_glyph(&self, dglyph: GlyphId, mut f: impl FnMut(GlyphId)) -> Option<()> {
+        match *self {
+            SingleSubstitution::Format1 { coverage, delta } => {
+                if let Some(_) = coverage.get(dglyph) {
+                    f(GlyphId((i32::from(dglyph.0) + i32::from(delta)) as u16));
+                }
+            }
+            SingleSubstitution::Format2 {
+                coverage,
+                substitutes,
+            } => {
+                if let Some(index) = coverage.get(dglyph) {
+                    f(substitutes.get(index)?);
+                }
+            }
+        }
+        Some(())
+    }
+}
 
-impl SubstituteGlyphVisitor<Variant> for ttf_parser::math::Variants<'_> {
-    fn visit_glyph<F: FnMut(GlyphId, Variant)>(&self, glyph: GlyphId, mut consumer: F) {
+impl VariantGlyphVisitor for ttf_parser::math::Variants<'_> {
+    fn visit_glyph(&self, dglyph: GlyphId, mut f: impl FnMut(GlyphId)) -> Option<()> {
+        // Do we need to pass on whether a variant glyph is horizontal or vertical to upstream?
+
         if let Some(hvars) = self
             .horizontal_constructions
-            .get(glyph)
+            .get(dglyph)
             .map(|ref gc| gc.variants)
         {
             for hvar in hvars {
-                consumer(hvar.variant_glyph, Variant::Math);
+                f(hvar.variant_glyph);
             }
         }
 
         if let Some(vvars) = self
             .vertical_constructions
-            .get(glyph)
+            .get(dglyph)
             .map(|ref gc| gc.variants)
         {
             for vvar in vvars {
-                consumer(vvar.variant_glyph, Variant::Math);
+                f(vvar.variant_glyph);
             }
         }
+
+        Some(())
+    }
+}
+
+impl VariantGlyphVisitor for Lookup<'_> {
+    fn visit_glyph(&self, dglyph: GlyphId, mut f: impl FnMut(GlyphId)) -> Option<()> {
+        use SubstitutionSubtable::*;
+
+        for subtable in self.subtables.into_iter::<SubstitutionSubtable>() {
+            match subtable {
+                Single(t) => t.visit_glyph(dglyph, &mut f)?,
+                Alternate(t) => t.visit_glyph(dglyph, &mut f)?,
+                _ => {}
+            }
+        }
+        Some(())
     }
 }
 
@@ -82,8 +95,8 @@ pub(crate) fn load_lookup(
     dglyphs: &[(char, GlyphId)],
 ) {
     for (c, v) in dglyphs {
-        lookup.visit_glyph(*v, |vg, v| {
-            reverse_gmap.insert((*c, v), vg);
+        lookup.visit_glyph(*v, |vg| {
+            reverse_gmap.insert((*c, Variant::Ssty(0)), vg);
         });
     }
 }
@@ -93,11 +106,11 @@ pub(crate) fn load_math_variants(
     variant: &ttf_parser::math::Variants<'_>,
     dglyphs: &[(char, GlyphId)],
 ) {
-    dglyphs.iter().for_each(|(c, g)| {
-        variant.visit_glyph(*g, |vg, v| {
-            reverse_gmap.insert((*c, v), vg);
+    for (c, dglyph) in dglyphs {
+        variant.visit_glyph(*dglyph, |vg| {
+            reverse_gmap.insert((*c, Variant::Math), vg);
         });
-    });
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,7 +125,7 @@ pub enum Variant {
 /// A collection for obtaining the usv's from glyphs
 #[derive(Default, Debug)]
 pub struct ReverseGlyphMap {
-    inner: HashMap<GlyphId, (char, Variant)>,
+    inner: AHashMap<GlyphId, (char, Variant)>,
 }
 
 impl ReverseGlyphMap {
@@ -132,3 +145,50 @@ impl ReverseGlyphMap {
         self.inner.len()
     }
 }
+
+pub(super) fn is_supported_tags(tag: Tag) -> bool {
+    if tag == Tag::from_bytes(b"ssty") {
+        return true;
+    }
+
+    let tag = tag.to_string();
+    let (a, n) = tag.split_at(2);
+
+    if a.starts_with("cv") {
+        match n.parse::<u32>().map(|ref n| (1..=99).contains(n)) {
+            Ok(true) => true,
+            _ => false,
+        }
+    } else if a.starts_with("ss") {
+        match n.parse::<u32>().map(|ref n| (1..=20).contains(n)) {
+            Ok(true) => true,
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_supported_tags() {
+        // Test for supported tags
+        assert!(is_supported_tags(Tag::from_bytes(b"ssty")));
+        assert!(is_supported_tags(Tag::from_bytes(b"cv01")));
+        assert!(is_supported_tags(Tag::from_bytes(b"cv99")));
+        assert!(is_supported_tags(Tag::from_bytes(b"ss01")));
+        assert!(is_supported_tags(Tag::from_bytes(b"ss20")));
+
+        // Test for unsupported tags
+        assert!(!is_supported_tags(Tag::from_bytes(b"abcd")));
+        assert!(!is_supported_tags(Tag::from_bytes(b"cv00")));
+        assert!(!is_supported_tags(Tag::from_bytes(b"cvv0")));
+        assert!(!is_supported_tags(Tag::from_bytes(b"ss00")));
+        assert!(!is_supported_tags(Tag::from_bytes(b"ss21")));
+    }
+}
+
+mod css;

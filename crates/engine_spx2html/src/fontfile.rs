@@ -12,10 +12,13 @@
 
 use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use percent_encoding::{utf8_percent_encode, CONTROLS};
-use std::{collections::HashMap, num::Wrapping, path::Path};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::{num::Wrapping, path::Path};
 use tectonic_errors::{anyhow::Context, prelude::*};
 use ttf_parser::{self as ttf, GlyphId, Tag};
 
+use crate::font::is_supported_tags;
 use crate::{
     font::{load_lookup, load_math_variants, ReverseGlyphMap, Variant},
     FixedPoint,
@@ -38,7 +41,7 @@ pub struct FontFileData {
     buffer: Vec<u8>,
 
     /// Information about how glyphs can be reverse-mapped to Unicode input
-    reverse_glyph_map: ReverseGlyphMap,
+    reverse_glyph_map: RefCell<ReverseGlyphMap>,
 
     /// The glyph for the basic space character, or zero (typically .notdef) if
     /// it can't be found.
@@ -169,9 +172,10 @@ impl FontFileData {
 
         // Check for additional substitution-based mappings.
 
+        // load(&mut reverse_glyph_map, gsub, &dglyphs);
         if let Some(gsub) = tables.gsub {
             for feat in gsub.features {
-                if feat.tag != SSTY {
+                if !is_supported_tags(feat.tag) {
                     continue;
                 }
 
@@ -256,15 +260,15 @@ impl FontFileData {
 
         Ok(FontFileData {
             buffer,
-            reverse_glyph_map,
+            reverse_glyph_map: RefCell::new(reverse_glyph_map),
             space_glyph,
             units_per_em,
             hmetrics,
             ascender,
             descender,
             baseline_factor,
-            variant_map_counts: HashMap::new(),
-            variant_map_allocations: HashMap::new(),
+            variant_map_counts: HashMap::default(),
+            variant_map_allocations: HashMap::default(),
             no_new_variants: false,
             fontdata_head_offset,
             fontdata_cmap_trec_idx,
@@ -273,7 +277,8 @@ impl FontFileData {
 
     /// Attempt to retrieve a mapping entry for the given glyph.
     pub fn lookup_mapping(&self, glyph: GlyphId) -> Option<(char, Variant)> {
-        self.reverse_glyph_map.query_usv(glyph)
+        // TODO: If not found, then do a search
+        self.reverse_glyph_map.borrow().query_usv(glyph)
     }
 
     /// Get the position of the baseline within the standard glyph cell.
