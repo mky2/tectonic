@@ -18,9 +18,8 @@ use std::{num::Wrapping, path::Path};
 use tectonic_errors::{anyhow::Context, prelude::*};
 use ttf_parser::{self as ttf, GlyphId, Tag};
 
-use crate::font::is_supported_tags;
 use crate::{
-    font::{load_lookup, load_math_variants, ReverseGlyphMap, Variant},
+    font::{load_gsub, load_math_variants, ReverseGlyphMap, Variant},
     FixedPoint,
 };
 
@@ -172,19 +171,8 @@ impl FontFileData {
 
         // Check for additional substitution-based mappings.
 
-        // load(&mut reverse_glyph_map, gsub, &dglyphs);
         if let Some(gsub) = tables.gsub {
-            for feat in gsub.features {
-                if !is_supported_tags(feat.tag) {
-                    continue;
-                }
-
-                for lookup_idx in feat.lookup_indices {
-                    if let Some(ref lookup) = gsub.lookups.get(lookup_idx) {
-                        load_lookup(&mut reverse_glyph_map, lookup, &dglyphs);
-                    }
-                }
-            }
+            load_gsub(&mut reverse_glyph_map, &gsub, &dglyphs);
         }
 
         // Check for math extras.
@@ -198,7 +186,7 @@ impl FontFileData {
         // Finally put all dglyphs to reverse_glyph_map.
 
         for (c, g) in dglyphs {
-            reverse_glyph_map.insert((c, Variant::Id), g);
+            reverse_glyph_map.insert((c, Variant::Direct), g);
         }
 
         // Get horizontal metrics data. Note that pinot doesn't currently
@@ -370,7 +358,7 @@ impl FontFileData {
     /// appropriate CSS can be generated. Consumes the object.
     ///
     /// `rel_path` is the path, relative to the output root, where the font
-    /// file(s) shouldb emitted. Currently, this may not contain any directory
+    /// file(s) should be emitted. Currently, this may not contain any directory
     /// components, due to the way that the "variant" font file paths are
     /// constructed. This wouldn't be too hard to change.
     ///

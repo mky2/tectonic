@@ -617,7 +617,9 @@ fn get_text_info(
     status: &mut dyn StatusBackend,
 ) -> Option<(char, String)> {
     let text_info = font.details.lookup_mapping(glyph).map(|(mut ch, v)| {
-        let var_index = if !matches!(v, Variant::Id) {
+        // TODO: If the variant is CV01-99 or SS01-20 then we should use `font-feature-settings` in CSS
+        // to select the glyphs.
+        let var_index = if !matches!(v, Variant::Direct) {
             if let Some(map) = font.details.request_variant(glyph, ch) {
                 ch = map.usv;
                 Some(map.variant_map_index)
