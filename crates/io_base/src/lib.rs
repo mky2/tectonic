@@ -440,7 +440,8 @@ impl<T: IoProvider> AsIoProviderMut for T {
 /// accessing it.
 pub trait IoProvider: AsIoProviderMut {
     /// Open the named file for output.
-    fn output_open_name(&mut self, _name: &str) -> OpenResult<OutputHandle> {
+    #[allow(unused_variables)]
+    fn output_open_name(&mut self, name: &str) -> OpenResult<OutputHandle> {
         OpenResult::NotAvailable
     }
 
@@ -450,10 +451,11 @@ pub trait IoProvider: AsIoProviderMut {
     }
 
     /// Open the named file for input.
+    #[allow(unused_variables)]
     fn input_open_name(
         &mut self,
-        _name: &str,
-        _status: &mut dyn StatusBackend,
+        name: &str,
+        status: &mut dyn StatusBackend,
     ) -> OpenResult<InputHandle> {
         OpenResult::NotAvailable
     }
@@ -490,7 +492,8 @@ pub trait IoProvider: AsIoProviderMut {
     /// filesystem and the input is a file on the filesystem, this function
     /// isn't necesssarily that important, but those conditions don't always
     /// hold.
-    fn input_open_primary(&mut self, _status: &mut dyn StatusBackend) -> OpenResult<InputHandle> {
+    #[allow(unused_variables)]
+    fn input_open_primary(&mut self, status: &mut dyn StatusBackend) -> OpenResult<InputHandle> {
         OpenResult::NotAvailable
     }
 
@@ -525,11 +528,12 @@ pub trait IoProvider: AsIoProviderMut {
     /// Save an a format dump in some way that this provider may be able to
     /// recover in the future. This awkward interface is needed to write
     /// formats with their special munged file names.
+    #[allow(unused_variables)]
     fn write_format(
         &mut self,
-        _name: &str,
-        _data: &[u8],
-        _status: &mut dyn StatusBackend,
+        name: &str,
+        data: &[u8],
+        status: &mut dyn StatusBackend,
     ) -> Result<()> {
         bail!("this I/O layer cannot save format files");
     }
