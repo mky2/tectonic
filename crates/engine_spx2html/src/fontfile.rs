@@ -234,14 +234,6 @@ impl FontFileData {
             }
         }
 
-        println!(
-            "Font stats: (size {}) (face {}) ({} {})",
-            reverse_glyph_map.len(),
-            face_index,
-            fontdata_cmap_trec_idx,
-            fontdata_head_offset,
-        );
-
         // All done!
 
         Ok(FontFileData {
