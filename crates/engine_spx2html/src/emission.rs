@@ -16,7 +16,7 @@ use crate::{
     assets::Assets,
     finalization::FinalizingState,
     fonts::{FamilyRelativeFontId, FontEnsemble, FontFamilyAnalysis, PathToNewFont},
-    html::Element,
+    html::{Element, HtmlElement},
     specials::Special,
     templating::Templating,
     Common, FixedPoint, TexFontNum,
@@ -850,8 +850,8 @@ impl EmittingState {
             );
 
             for (idx, text_info, advance) in iter {
-                if let Some((ch, font_sel)) = text_info {
-                    let ch_as_str = ch.encode_utf8(&mut ch_str_buf);
+                if let Some(ref glyph_info) = text_info {
+                    let ch_as_str = glyph_info.ch.encode_utf8(&mut ch_str_buf);
 
                     // XXX this is (part of) push_space_if_needed
                     if self
@@ -861,9 +861,18 @@ impl EmittingState {
                         self.content.push_char(' ');
                     }
 
-                    write!(self.content, "<span style=\"{font_sel}\">").unwrap();
+                    // A lot of allocation for a relatively hot code.
+                    // Should consider using an arena allocator.
+                    let mut span_el = HtmlElement::with_tag(Element::Span);
+
+                    // Font selection
+                    glyph_info.for_each_rule(|rule| {
+                        span_el.add_style(rule.to_css());
+                    });
+
+                    self.content.push_str(&span_el.create_start());
                     self.content.push_with_html_escaping(ch_as_str);
-                    write!(self.content, "</span>").unwrap();
+                    self.content.push_str(&span_el.create_end());
                 }
 
                 self.content
@@ -1094,7 +1103,7 @@ impl EmittingState {
             // relative to the main body font.
             let rel_size = size as f32 * self.rems_per_tex;
 
-            if let Some((ch, font_sel)) = text_info {
+            if let Some(glyph_info) = text_info {
                 // dy gives the target position of this glyph's baseline
                 // relative to the canvas's baseline. For our `position:
                 // absolute` layout, we have to convert that into the distance
@@ -1123,19 +1132,22 @@ impl EmittingState {
 
                 // Stringify the character so that we can use html_escape in
                 // case it's a `<` or whatever.
-                let ch_as_str = ch.encode_utf8(&mut ch_str_buf);
+                let ch_as_str = glyph_info.ch.encode_utf8(&mut ch_str_buf);
 
-                write!(
-                    inner_content,
-                    "<span class=\"ci\" style=\"top: {:.4}rem; left: {:.4}rem; font-size: {:.4}rem; {}\">",
-                    top_rem,
-                    gi.dx as f32 * self.rems_per_tex,
-                    rel_size,
-                    font_sel,
-                )
-                .unwrap();
+                let mut span_el = HtmlElement::with_tag(Element::Span);
+
+                span_el.add_class("ci");
+                span_el.add_style(format!("top: {:.4}rem", top_rem));
+                span_el.add_style(format!("left: {:.4}rem", gi.dx as f32 * self.rems_per_tex));
+                span_el.add_style(format!("font-size: {:.4}rem", rel_size));
+
+                glyph_info.for_each_rule(|rule| {
+                    span_el.add_style(rule.to_css());
+                });
+
+                inner_content.push_str(&span_el.create_start());
                 html_escape::encode_text_to_string(ch_as_str, &mut inner_content);
-                write!(inner_content, "</span>").unwrap();
+                inner_content.push_str(&span_el.create_end());
             }
         }
 

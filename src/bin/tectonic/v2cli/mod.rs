@@ -158,7 +158,7 @@ trait TectonicCommand {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum Commands {
-    #[command(name = "build")]
+    #[command(name = "build", visible_alias = "b")]
     /// Build a document
     Build(BuildCommand),
 

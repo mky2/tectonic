@@ -6,6 +6,7 @@
 //! Here a "font family" is interpreted in the HTML sense, meaning a set of
 //! related fonts. In typography you might call this a typeface.
 
+use core::str;
 use std::{collections::HashMap, fmt::Write, io::Read, path::Path};
 use tectonic_errors::prelude::*;
 use tectonic_io_base::InputHandle;
@@ -16,6 +17,7 @@ use crate::{
     assets::syntax,
     font::Variant,
     fontfile::{FontFileData, GlyphMetrics},
+    html::HtmlElement,
     Common, FixedPoint, TexFontNum,
 };
 
@@ -272,7 +274,7 @@ impl FontEnsemble {
         fnum: TexFontNum,
         glyph: GlyphId,
         status: &mut dyn StatusBackend,
-    ) -> (Option<(char, String)>, FixedPoint, f32) {
+    ) -> (Option<HtmlGlyphInfo>, FixedPoint, f32) {
         // Can't borrow `self` in the map() closure.
         let font_files = &mut self.font_files;
 
@@ -308,7 +310,7 @@ impl FontEnsemble {
         font_num: TexFontNum,
         glyphs: &'a [GlyphId],
         status: &'a mut dyn StatusBackend,
-    ) -> Result<impl Iterator<Item = (usize, Option<(char, String)>, FixedPoint)> + 'a> {
+    ) -> Result<impl Iterator<Item = (usize, Option<HtmlGlyphInfo>, FixedPoint)> + 'a> {
         // Can't use lookup_tex() here since the borrow checker treats it as
         // borrowing all of `self`, not just the `tex_fonts` member.
         let fi = a_ok_or!(
@@ -374,13 +376,16 @@ impl FontEnsemble {
         let tfi = self.lookup_tex(fnum)?;
         let rel_size = tfi.size as f32 * rems_per_tex;
 
-        write!(
-            dest,
-            "<span style=\"font-size: {}rem; {}\">",
-            rel_size,
-            self.font_files[tfi.fid].selection_style_text(None)
-        )
-        .map_err(|e| e.into())
+        let mut span_el = HtmlElement::with_tag(crate::html::Element::Span);
+
+        span_el.add_style(format!("font-size: {}rem", rel_size));
+        span_el.add_style(format!(
+            "font-family: {}",
+            self.font_files[tfi.fid].font_family()
+        ));
+
+        dest.write_str(&span_el.create_start())
+            .map_err(|e| e.into())
     }
 
     /// Emit the font files and return CSS code setting up the files.
@@ -580,7 +585,7 @@ struct GlyphTextProcessingIterator<'a> {
 }
 
 impl Iterator for GlyphTextProcessingIterator<'_> {
-    type Item = (usize, Option<(char, String)>, FixedPoint);
+    type Item = (usize, Option<HtmlGlyphInfo>, FixedPoint);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.next >= self.glyphs.len() {
@@ -610,38 +615,91 @@ impl Iterator for GlyphTextProcessingIterator<'_> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub(crate) enum FontCssRule {
+    CV(u8),
+    SS(u8),
+    FontFamily(String),
+    FontBold,
+    FontItalic,
+    FontBoldItalic,
+}
+
+impl FontCssRule {
+    pub fn to_css(&self) -> String {
+        match self {
+            FontCssRule::CV(n) => format!("font-feature-settings: \'cv{n:02}\'"),
+            FontCssRule::SS(n) => format!("font-feature-settings: \'ss{n:02}\'"),
+            FontCssRule::FontFamily(name) => format!("font-family: {name}"),
+            FontCssRule::FontBold => "font-weight: bold".to_string(),
+            FontCssRule::FontItalic => "font-style: italic".to_string(),
+            FontCssRule::FontBoldItalic => "font-weight: bold; font-style: italic".to_string(),
+        }
+    }
+}
+
+pub struct HtmlGlyphInfo {
+    /// The Unicode character that corresponds to this glyph.
+    pub ch: char,
+
+    /// The CSS rule that will select the font for this glyph.
+    pub css_rules: Vec<FontCssRule>,
+}
+
+impl HtmlGlyphInfo {
+    pub fn for_each_rule(&self, mut f: impl FnMut(&FontCssRule)) {
+        for rule in &self.css_rules {
+            f(rule);
+        }
+    }
+}
+
 /// Get information about how to render a desired glyph from a font.
 fn get_text_info(
     font: &mut Font,
     glyph: GlyphId,
     status: &mut dyn StatusBackend,
-) -> Option<(char, String)> {
+) -> Option<HtmlGlyphInfo> {
     let text_info = font.details.lookup_mapping(glyph).map(|(mut ch, v)| {
+        let mut css = Vec::new();
+
         // TODO: If the variant is CV01-99 or SS01-20 then we should use `font-feature-settings` in CSS
         // to select the glyphs.
-        let var_index = if !matches!(v, Variant::Direct) {
-            if let Some(map) = font.details.request_variant(glyph, ch) {
-                ch = map.usv;
-                Some(map.variant_map_index)
-            } else {
-                tt_warning!(
-                    status,
-                    "prohibited from defining new variant glyph {} in font `{}` (face {})",
-                    glyph.0,
-                    font.out_rel_path,
-                    font.face_index
-                );
-                None
+
+        let mut var_index = None;
+
+        match v {
+            Variant::Direct => {}
+            Variant::CharacterVariant(n) => {
+                css.push(FontCssRule::CV(n as u8));
             }
-        } else {
-            None
-        };
+            Variant::StylisticSet(n) => {
+                css.push(FontCssRule::SS(n as u8));
+            }
+            _ => {
+                // Variant font is required.
+
+                if let Some(map) = font.details.request_variant(glyph, ch) {
+                    ch = map.usv;
+                    var_index = Some(map.variant_map_index);
+                } else {
+                    tt_warning!(
+                        status,
+                        "prohibited from defining new variant glyph {} in font `{}` (face {})",
+                        glyph.0,
+                        font.out_rel_path,
+                        font.face_index
+                    );
+                }
+            }
+        }
 
         // For later: might help to allow some context about the active font so
         // that we can maybe use a simpler selection string here.
-        let font_sel = font.selection_style_text(var_index);
+        font.selection_style_text(&mut css, var_index);
 
-        (ch, font_sel)
+        HtmlGlyphInfo { ch, css_rules: css }
     });
 
     if text_info.is_none() {
@@ -783,20 +841,28 @@ impl Font {
     /// Generate a snippet of CSS for an HTML `style` attribute that will select
     /// the appropriate font, given that we might need to select one of the
     /// "variants" generated to make unusual glyphs available.
-    fn selection_style_text(&self, variant_map_index: Option<usize>) -> String {
+    fn selection_style_text(&self, css: &mut Vec<FontCssRule>, variant_map_index: Option<usize>) {
         let var_text = variant_map_index
             .map(|i| format!("vg{i}"))
             .unwrap_or_default();
 
-        let extra = match self.family_relation {
-            FamilyRelativeFontId::Regular => "",
-            FamilyRelativeFontId::Bold => "; font-weight: bold",
-            FamilyRelativeFontId::Italic => "; font-style: italic",
-            FamilyRelativeFontId::BoldItalic => "; font-weight: bold; font-style: italic",
+        match self.family_relation {
+            FamilyRelativeFontId::Regular => {}
+            FamilyRelativeFontId::Bold => css.push(FontCssRule::FontBold),
+            FamilyRelativeFontId::Italic => css.push(FontCssRule::FontItalic),
+            FamilyRelativeFontId::BoldItalic => css.push(FontCssRule::FontBoldItalic),
             FamilyRelativeFontId::Other(_) => unreachable!(),
         };
 
-        format!("font-family: {}{}{}", self.family_name, var_text, extra)
+        css.push(FontCssRule::FontFamily(format!(
+            "{}{}",
+            self.family_name, var_text
+        )));
+    }
+
+    // Temporary as a hack
+    fn font_family(&self) -> String {
+        self.family_name.clone()
     }
 }
 

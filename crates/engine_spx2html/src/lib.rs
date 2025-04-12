@@ -135,9 +135,9 @@ impl Spx2HtmlEngine {
         &mut self,
         hooks: &mut dyn DriverHooks,
         status: &mut dyn StatusBackend,
-        spx: &str,
+        spx_path: &str,
     ) -> Result<()> {
-        let mut input = hooks.io().input_open_name(spx, status).must_exist()?;
+        let mut input = hooks.io().input_open_name(spx_path, status).must_exist()?;
 
         let out_base = match self.output {
             OutputState::NoOutput => None,
@@ -157,6 +157,7 @@ impl Spx2HtmlEngine {
                 let (name, digest) = output.into_name_digest();
                 hooks.event_output_closed(name, digest);
             } else if !self.do_not_emit_assets {
+                // Should the base CSS for font selection be considered as an asset?
                 assets.emit(fonts, &mut common)?;
             }
         }

@@ -3,7 +3,11 @@
 
 //! Helpers for working with HTML5 elements.
 
+use std::collections::hash_map::Entry;
+use std::fmt::Write;
 use std::str::FromStr;
+
+use ahash::HashMap;
 
 macro_rules! emit_element_data {
     ($([
@@ -237,4 +241,86 @@ emit_element_data! {
     [Video "video" deprecated(false) empty(false) autoclosed()],
     [Wbr "wbr" deprecated(false) empty(true) autoclosed()],
     [Xmp "xmp" deprecated(true) empty(false) autoclosed()],
+}
+
+pub struct HtmlElement {
+    tag: Element,
+    attributes: HashMap<String, String>,
+}
+
+impl HtmlElement {
+    pub fn with_tag(tag: Element) -> Self {
+        Self {
+            tag,
+            attributes: HashMap::default(),
+        }
+    }
+
+    pub fn add_class(&mut self, class: &str) {
+        let entry = self.attribute_entry("class");
+
+        match entry {
+            Entry::Occupied(mut inner) => {
+                let value = inner.get_mut();
+                value.push(' ');
+                value.push_str(class);
+            }
+            Entry::Vacant(inner) => {
+                inner.insert(class.into());
+            }
+        }
+    }
+
+    pub fn add_style<T: AsRef<str>>(&mut self, style: T) {
+        let entry = self.attribute_entry("style");
+
+        match entry {
+            Entry::Occupied(mut inner) => {
+                let value = inner.get_mut();
+                value.push_str("; ");
+                value.push_str(style.as_ref());
+            }
+            Entry::Vacant(inner) => {
+                inner.insert(style.as_ref().into());
+            }
+        }
+    }
+
+    pub fn attribute_entry<T: Into<String>>(&mut self, key: T) -> Entry<String, String> {
+        self.attributes.entry(key.into())
+    }
+
+    pub fn create_start(&self) -> String {
+        let mut w = String::new();
+
+        w.push('<');
+        w.push_str(self.tag.name());
+        for (k, v) in self.attributes.iter() {
+            w.push(' ');
+            write!(&mut w, "{}=\"{}\"", k, v).unwrap();
+        }
+        w.push('>');
+
+        w
+    }
+
+    pub fn create_end(&self) -> String {
+        format!("</{}>", self.tag.name())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_add_class() {
+        let mut element = HtmlElement::with_tag(Element::Div);
+        element.add_class("a");
+        assert_eq!(element.create_start(), r#"<div class="a">"#);
+
+        element.add_class("b");
+        assert_eq!(element.create_start(), r#"<div class="a b">"#);
+        assert_eq!(element.create_end(), "</div>");
+    }
 }

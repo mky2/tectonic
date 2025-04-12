@@ -110,7 +110,7 @@ pub(crate) fn load_gsub(
 ) -> Option<()> {
     for (c, dglyph) in dglyphs {
         for feat in gsub.features {
-            let tag_variant = match tag_variant(feat.tag) {
+            let tag_variant = match get_tag_variant(feat.tag) {
                 Some(e) => e,
                 None => continue,
             };
@@ -177,7 +177,7 @@ impl ReverseGlyphMap {
     }
 }
 
-pub(super) fn tag_variant(tag: Tag) -> Option<Variant> {
+fn get_tag_variant(tag: Tag) -> Option<Variant> {
     match tag.to_string().as_str() {
         "ssty" => Some(Variant::Ssty),
         tag if tag.starts_with("cv") => tag[2..]

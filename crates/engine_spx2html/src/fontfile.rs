@@ -29,8 +29,6 @@ use crate::{
 /// inclusive). Values within this range can be converted to Rust "char" values.
 pub type Usv = u32;
 
-const SSTY: Tag = Tag::from_bytes(b"ssty");
-
 /// A type for retrieving data about the glyphs used in a particular font.
 #[derive(Debug)]
 pub struct FontFileData {
